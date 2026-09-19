@@ -1,0 +1,10 @@
+{
+  "name": "component-detection-frontend-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nested npm fixture for Component Detection integration testing",
+  "license": "MIT",
+  "dependencies": {
+    "picocolors": "1.1.1"
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+bin/
+obj/
+.venv/
+venv/
+vendor/bundle/
+python/component-detection-pip-report.json
+go/go-fixture.exe
