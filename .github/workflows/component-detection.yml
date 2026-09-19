@@ -90,3 +90,123 @@ jobs:
         uses: advanced-security/component-detection-dependency-submission-action@felickz-fix-npm-snapshot-manifests
         with:
           correlator: multi-ecosystem-integration
+
+      - name: Verify submitted dependency graph SBOM
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${DEFAULT_BRANCH}" != "main" || "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]]; then
+            echo "::error::Verification must run on the default main branch, not ${GITHUB_REF}."
+            exit 1
+          fi
+
+          sbom_file="${RUNNER_TEMP}/dependency-graph-sbom.json"
+          max_attempts=12
+          retry_seconds=10
+
+          for attempt in $(seq 1 "${max_attempts}"); do
+            echo "Fetching dependency graph SBOM (attempt ${attempt}/${max_attempts})..."
+            if ! gh api "repos/${GITHUB_REPOSITORY}/dependency-graph/sbom" > "${sbom_file}"; then
+              if [[ "${attempt}" -eq "${max_attempts}" ]]; then
+                echo "::error::Could not fetch the dependency graph SBOM."
+                exit 1
+              fi
+              sleep "${retry_seconds}"
+              continue
+            fi
+
+            if ! jq -e '
+              [
+                .sbom.packages[]?
+                | select(
+                    ((.name // "") | test("10\\.0\\.400|net8\\.0 unknown"; "i"))
+                    or any(
+                      .externalRefs[]?;
+                      .referenceType == "purl"
+                      and ((.referenceLocator // "") | test("10\\.0\\.400|net8\\.0 unknown"; "i"))
+                    )
+                  )
+              ]
+              | length == 0
+            ' "${sbom_file}" > /dev/null; then
+              echo "::error::The SBOM persisted a forbidden .NET SDK/framework package."
+              exit 1
+            fi
+
+            if ! jq -e '
+              [
+                (.sbom.packages[]? | .. | strings),
+                (.sbom.files[]? | .. | strings)
+              ]
+              | all(contains("/node_modules/") | not)
+            ' "${sbom_file}" > /dev/null; then
+              echo "::error::The SBOM contains package or file evidence under /node_modules/."
+              exit 1
+            fi
+
+            console_id="$(
+              jq -r '
+                [
+                  .sbom.packages[]?
+                  | select(
+                      .name == "Serilog.Sinks.Console"
+                      and .versionInfo == "6.0.0"
+                      and any(
+                        .externalRefs[]?;
+                        .referenceType == "purl"
+                        and .referenceLocator == "pkg:nuget/Serilog.Sinks.Console@6.0.0"
+                      )
+                    )
+                  | .SPDXID
+                ][0] // empty
+              ' "${sbom_file}"
+            )"
+            serilog_id="$(
+              jq -r '
+                [
+                  .sbom.packages[]?
+                  | select(
+                      .name == "Serilog"
+                      and .versionInfo == "4.0.0"
+                      and any(
+                        .externalRefs[]?;
+                        .referenceType == "purl"
+                        and .referenceLocator == "pkg:nuget/Serilog@4.0.0"
+                      )
+                    )
+                  | .SPDXID
+                ][0] // empty
+              ' "${sbom_file}"
+            )"
+
+            if [[ -n "${console_id}" && -n "${serilog_id}" ]] \
+              && jq -e \
+                --arg console_id "${console_id}" \
+                --arg serilog_id "${serilog_id}" \
+                '
+                  .sbom.relationships
+                  | any(
+                      .spdxElementId == $console_id
+                      and .relatedSpdxElement == $serilog_id
+                      and .relationshipType == "DEPENDS_ON"
+                    )
+                ' "${sbom_file}" > /dev/null; then
+              echo "Verified exact Serilog packages and their SPDX DEPENDS_ON relationship."
+              echo "The SBOM API does not expose submission manifest/source metadata; expected source is documented in README.md."
+              exit 0
+            fi
+
+            if [[ "${attempt}" -eq "${max_attempts}" ]]; then
+              echo "::error::Timed out waiting for the expected Serilog dependency graph."
+              jq '{
+                packages: [.sbom.packages[]? | select((.name // "") | startswith("Serilog")) | {name, versionInfo, SPDXID}],
+                relationships: [.sbom.relationships[]? | select(.relationshipType == "DEPENDS_ON")]
+              }' "${sbom_file}"
+              exit 1
+            fi
+
+            sleep "${retry_seconds}"
+          done

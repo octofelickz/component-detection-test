@@ -23,3 +23,34 @@ The workflow restores every fixture before running Component Detection. NuGet re
 dependencies, so the submitted graph can contain more components than the direct dependencies listed above.
 
 The dependency submission uses the stable `multi-ecosystem-integration` correlator so repeated runs replace the same logical snapshot.
+
+## Expected .NET SDK behavior
+
+Component Detection may retain an internal graph node such as `10.0.400 net8.0 unknown - DotNet`. That observed
+detector behavior is not an actionable package dependency: the node must be omitted from `componentsFound` and from
+the submitted dependency snapshot. SDK, runtime, and framework components are serviced through SDK, runtime, operating
+system, or base-image updates rather than through a project `PackageReference`, so the SDK node must not be persisted in
+the repository dependency graph.
+
+This exclusion is distinct from the framework conflict-resolution rationale documented for
+[`NuGetProjectCentric`](https://github.com/microsoft/component-detection/blob/main/docs/detectors/nuget.md#nugetprojectcentric).
+The current default-on `MSBuildBinaryLog` detector replaces the former `NuGetProjectCentric` and `DotNet` detectors.
+During a build, the .NET SDK resolves conflicts by ignoring package assets that overlap newer assets supplied by the
+target framework. Because that result is not persisted in a build artifact, Component Detection approximates it with
+framework-specific package lists and marks losing packages as development dependencies. The documented
+`PrunePackageReference` work moves similar conflict resolution into NuGet restore, where pruned packages are not
+downloaded and therefore do not appear in `project.assets.json`. Those rules explain how conflicting
+`PackageReference` packages are classified or removed; they do not justify submitting the SDK itself as a package
+dependency.
+
+The actionable expected .NET graph is:
+
+| Component | Expected relationship | Source manifest |
+| --- | --- | --- |
+| `Serilog.Sinks.Console@6.0.0` | Direct | `dotnet/ComponentDetectionTest.csproj` |
+| `Serilog@4.0.0` | Transitive dependency of `Serilog.Sinks.Console@6.0.0` | `dotnet/ComponentDetectionTest.csproj` |
+
+The exported dependency graph SBOM exposes exact package identities and the
+`Serilog.Sinks.Console@6.0.0 DEPENDS_ON Serilog@4.0.0` SPDX relationship. It does not currently expose the dependency
+submission manifest/source metadata or direct/transitive labels, so the workflow verifies the supported SBOM evidence
+without making fragile assertions about unavailable fields.
